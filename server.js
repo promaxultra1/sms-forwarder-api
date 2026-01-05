@@ -1,49 +1,78 @@
 import express from "express";
-import nodemailer from "nodemailer";
+import { google } from "googleapis";
 
 const app = express();
 app.use(express.json());
 
-// Environment variables (we’ll set these later on Render)
+// Android -> backend shared secret
 const API_KEY = process.env.API_KEY;
+
+// Where to send the forwarded emails (your Gmail)
 const TO_EMAIL = process.env.TO_EMAIL;
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
 
-// Setup Gmail SMTP transport
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: SMTP_USER, pass: SMTP_PASS },
-});
+// Google OAuth
+const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
+const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
+const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
 
-// Health check (useful to see if server is alive)
-app.get("/", (req, res) => res.send("OK"));
+// Create OAuth2 client
+const oAuth2Client = new google.auth.OAuth2(
+  GMAIL_CLIENT_ID,
+  GMAIL_CLIENT_SECRET
+);
+oAuth2Client.setCredentials({ refresh_token: GMAIL_REFRESH_TOKEN });
 
-// Main endpoint your Android app will call
+const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
+
+app.get("/", (_, res) => res.send("OK"));
+
+function makeRawEmail({ from, to, subject, text }) {
+  const message =
+    `From: ${from}\r\n` +
+    `To: ${to}\r\n` +
+    `Subject: ${subject}\r\n` +
+    "MIME-Version: 1.0\r\n" +
+    "Content-Type: text/plain; charset=utf-8\r\n" +
+    "\r\n" +
+    text;
+
+  return Buffer.from(message)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
 app.post("/sms", async (req, res) => {
   try {
-    // Simple API key check
+    // Check API key
     const key = req.header("x-api-key");
     if (!API_KEY || key !== API_KEY) {
       return res.status(401).json({ error: "unauthorized" });
     }
 
-    // Read SMS payload
+    // Extract SMS fields
     const { from, body, timestamp } = req.body || {};
     if (!from || !body) {
       return res.status(400).json({ error: "missing from/body" });
     }
 
-    const when = timestamp
-      ? new Date(timestamp).toString()
-      : new Date().toString();
+    const when = timestamp ? new Date(timestamp).toString() : new Date().toString();
 
-    // ✅ SUBJECT starts with "SMS FORWARD"
-    await transporter.sendMail({
-      from: SMTP_USER,
+    // ✅ Subject starts with SMS FORWARD
+    const subject = `SMS FORWARD | ${from}`;
+    const text = `From: ${from}\nTime: ${when}\n\n${body}`;
+
+    const raw = makeRawEmail({
+      from: TO_EMAIL,
       to: TO_EMAIL,
-      subject: `SMS FORWARD | ${from}`,
-      text: `From: ${from}\nTime: ${when}\n\n${body}`,
+      subject,
+      text,
+    });
+
+    await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
     });
 
     res.json({ ok: true });
@@ -53,6 +82,5 @@ app.post("/sms", async (req, res) => {
   }
 });
 
-// Render sets PORT automatically
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Listening on ${port}`));
